@@ -1,3 +1,5 @@
+![rom-antics logo](assets/logo.png)
+
 # rom-antics
 
 **rom-antics** is a GUI-based ROM management tool built with PyQt6. It provides an intuitive two-panel interface for managing your ROM files—enabling you to filter, select, deduplicate, and copy your ROMs from a source directory to a destination directory. Future plans include metadata scraping to support platforms like Batocera, EmulationStation, Garlic OS, and more.
