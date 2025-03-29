@@ -19,9 +19,21 @@ class FileCopyWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # Initialize directories
-        self.source_directory = ""
-        self.dest_directory = ""
+        # Initialize directories with defaults, fallback to current directory
+        default_source = "/media/thoth/Jalpaite/ROMS/"
+        default_dest = "/media/peter/"
+        current_dir = os.getcwd()
+        
+        # Try default source, fallback to current directory
+        self.source_directory = (
+            default_source if os.path.exists(default_source) else current_dir
+        )
+        
+        # Try default destination, fallback to current directory
+        self.dest_directory = (
+            default_dest if os.path.exists(default_dest) else current_dir
+        )
+        
         self.destination_free_space = 0
         self.extensions = ["All", ".mp3", ".flac", ".wav", ".m4a", ".ogg"]
         
@@ -72,17 +84,54 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         
         # Source group
         source_group = QtWidgets.QGroupBox("Source")
-        source_layout = QtWidgets.QVBoxLayout()
+        source_layout = QtWidgets.QVBoxLayout(source_group)
         
         source_path_layout = QtWidgets.QHBoxLayout()
         self.source_path = QtWidgets.QLineEdit()
+        self.source_path.setReadOnly(True)
         self.source_path.setText(self.source_directory)
-        self.source_path.textChanged.connect(self.source_path_changed)
+        source_path_layout.addWidget(self.source_path)
+        
         source_browse = QtWidgets.QPushButton("Browse")
         source_browse.clicked.connect(lambda: self.browse_directory("source"))
-        source_path_layout.addWidget(self.source_path)
         source_path_layout.addWidget(source_browse)
         source_layout.addLayout(source_path_layout)
+        
+        # Source list with select all toggle
+        source_list_layout = QtWidgets.QVBoxLayout()
+        source_toggle_layout = QtWidgets.QHBoxLayout()
+        self.source_toggle = QtWidgets.QCheckBox("Select All")
+        source_toggle_layout.addWidget(self.source_toggle)
+        source_toggle_layout.addStretch()
+        source_list_layout.addLayout(source_toggle_layout)
+        
+        self.source_list = QtWidgets.QListWidget()
+        self.source_list.itemChanged.connect(self.on_source_item_changed)
+        self.source_list.setSelectionMode(QtWidgets.QListWidget.SelectionMode.ExtendedSelection)
+        source_list_layout.addWidget(self.source_list)
+        source_layout.addLayout(source_list_layout)
+        
+        def toggle_source_selection(state):
+            for i in range(self.source_list.count()):
+                item = self.source_list.item(i)
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if state 
+                    else QtCore.Qt.CheckState.Unchecked
+                )
+            self.update_size_indicator()
+            
+        # Connect source list item changes to update size
+        def on_source_item_changed(item):
+            self.update_size_indicator()
+            # Update toggle state based on all items
+            all_checked = all(
+                self.source_list.item(i).checkState() == QtCore.Qt.CheckState.Checked
+                for i in range(self.source_list.count())
+            )
+            self.source_toggle.setChecked(all_checked)
+            
+        self.source_list.itemChanged.connect(on_source_item_changed)
+        self.source_toggle.stateChanged.connect(toggle_source_selection)
         
         # Extension filter
         filter_layout = QtWidgets.QHBoxLayout()
@@ -91,25 +140,19 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         self.extension_combo.addItems(self.extensions)
         self.extension_combo.currentTextChanged.connect(self.load_source_files)
         filter_layout.addWidget(self.extension_combo)
+        filter_layout.addStretch()
         source_layout.addLayout(filter_layout)
         
-        self.source_list = QtWidgets.QListWidget()
-        self.source_list.setSelectionMode(QtWidgets.QListWidget.SelectionMode.ExtendedSelection)
-        self.source_list.itemSelectionChanged.connect(self.update_size_indicator)
-        source_layout.addWidget(self.source_list)
-        
-        # Source info layout
-        source_info_layout = QtWidgets.QHBoxLayout()
-        self.selected_size_label = QtWidgets.QLabel("Selected: 0 B")
-        source_info_layout.addWidget(self.selected_size_label)
-        source_layout.addLayout(source_info_layout)
+        # Size indicator
+        self.size_label = QtWidgets.QLabel("Selected: 0 B")
+        source_layout.addWidget(self.size_label)
         
         source_group.setLayout(source_layout)
         lists_layout.addWidget(source_group)
         
         # Destination group
         dest_group = QtWidgets.QGroupBox("Destination")
-        dest_layout = QtWidgets.QVBoxLayout()
+        dest_layout = QtWidgets.QVBoxLayout(dest_group)
         
         dest_path_layout = QtWidgets.QHBoxLayout()
         self.dest_path = QtWidgets.QLineEdit()
@@ -121,9 +164,28 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         dest_path_layout.addWidget(dest_browse)
         dest_layout.addLayout(dest_path_layout)
         
+        # Destination list with select all toggle
+        dest_list_layout = QtWidgets.QVBoxLayout()
+        dest_toggle_layout = QtWidgets.QHBoxLayout()
+        self.dest_toggle = QtWidgets.QCheckBox("Select All")
+        dest_toggle_layout.addWidget(self.dest_toggle)
+        dest_toggle_layout.addStretch()
+        dest_list_layout.addLayout(dest_toggle_layout)
+        
         self.dest_list = QtWidgets.QListWidget()
         self.dest_list.setSelectionMode(QtWidgets.QListWidget.SelectionMode.ExtendedSelection)
-        dest_layout.addWidget(self.dest_list)
+        dest_list_layout.addWidget(self.dest_list)
+        dest_layout.addLayout(dest_list_layout)
+        
+        def toggle_dest_selection(state):
+            for i in range(self.dest_list.count()):
+                item = self.dest_list.item(i)
+                item.setCheckState(
+                    QtCore.Qt.CheckState.Checked if state 
+                    else QtCore.Qt.CheckState.Unchecked
+                )
+            
+        self.dest_toggle.stateChanged.connect(toggle_dest_selection)
         
         # Destination info layout
         dest_info_layout = QtWidgets.QHBoxLayout()
@@ -183,7 +245,12 @@ class FileCopyWindow(QtWidgets.QMainWindow):
     def load_source_files(self):
         """Load files from source directory."""
         self.source_list.clear()
+        self.source_toggle.setChecked(False)  # Reset toggle state
         
+        if not os.path.exists(self.source_directory):
+            self.source_path.setText("")
+            return
+            
         try:
             extension = self.extension_combo.currentText()
             files = os.listdir(self.source_directory)
@@ -204,12 +271,17 @@ class FileCopyWindow(QtWidgets.QMainWindow):
                 f"Could not load source directory: {str(e)}"
             )
             
-        self.update_size_indicator()  # Update the UI
+        self.update_size_indicator()
 
     def load_dest_files(self):
         """Load files from destination directory."""
         self.dest_list.clear()
+        self.dest_toggle.setChecked(False)  # Reset toggle state
         
+        if not os.path.exists(self.dest_directory):
+            self.dest_path.setText("")
+            return
+            
         try:
             files = os.listdir(self.dest_directory)
             
@@ -228,168 +300,46 @@ class FileCopyWindow(QtWidgets.QMainWindow):
                 f"Could not load destination directory: {str(e)}"
             )
 
-    def update_free_space(self):
-        """Update free space indicator for destination directory."""
-        try:
-            if os.path.exists(self.dest_directory):
-                _, _, free = shutil.disk_usage(self.dest_directory)
-                self.destination_free_space = free
-                free_text = self.human_readable_size(free)
-                self.free_space_label.setText(f"Free space: {free_text}")
-        except OSError:
-            self.free_space_label.setText("Free space: Error")
-            self.destination_free_space = 0
+    def get_selected_files(self, list_widget):
+        """Get list of selected files from a list widget."""
+        selected = []
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                file_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                selected.append(file_path)
+        return selected
 
-    def get_free_space(self, path):
-        """Get free space in bytes for the given path."""
-        try:
-            return shutil.disk_usage(path).free
-        except OSError:
-            return 0
-
-    def human_readable_size(self, size):
-        """Convert size in bytes to human readable format."""
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} PB"
-
-    def browse_directory(self, target):
-        """Open a directory browser dialog."""
-        dialog = QtWidgets.QFileDialog()
-        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
-        
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            selected_dir = dialog.selectedFiles()[0]
-            if target == "source":
-                self.source_directory = selected_dir
-                self.source_path.setText(selected_dir)
-                self.load_source_files()
-            else:
-                self.dest_directory = selected_dir
-                self.dest_path.setText(selected_dir)
-                self.load_dest_files()
-                self.update_free_space()
-
-    def clean_selected_directory(self):
-        """Clean filenames in selected directories."""
-        if not (self.clean_source.isChecked() or self.clean_dest.isChecked()):
-            QtWidgets.QMessageBox.warning(self, "Warning", "Please select at least one directory to clean")
-            return
-            
-        changes = []
-        errors = []
-        
-        if self.clean_source.isChecked():
-            changes.extend(self.get_files_to_clean(self.source_list, self.source_directory))
-            
-        if self.clean_dest.isChecked():
-            changes.extend(self.get_files_to_clean(self.dest_list, self.dest_directory))
-            
-        if not changes:
-            QtWidgets.QMessageBox.information(self, "Clean Names", "No files need cleaning.")
-            return
-            
-        # Show confirmation dialog
-        msg = self.build_clean_message(changes)
-        if not self.confirm_clean(msg):
-            return
-            
-        # Apply changes and refresh
-        errors = self.apply_clean_changes(changes)
-        
-        # Refresh lists
-        if self.clean_source.isChecked():
-            self.load_source_files()
-        if self.clean_dest.isChecked():
-            self.load_dest_files()
-            self.update_free_space()
-            
-        self.show_clean_results(len(changes), errors)
-            
-    def build_clean_message(self, changes):
-        """Build message showing files to be renamed."""
-        msg = "The following files will be renamed:\n\n"
-        for _, _, old_name, new_name in changes[:10]:
-            msg += f"{old_name} → {new_name}\n"
-        if len(changes) > 10:
-            msg += f"\n...and {len(changes) - 10} more files"
-        return msg
-        
-    def confirm_clean(self, msg):
-        """Show confirmation dialog and return user's choice."""
-        response = QtWidgets.QMessageBox.question(
-            self, "Confirm Rename",
-            msg,
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
-        )
-        return response == QtWidgets.QMessageBox.StandardButton.Yes
-        
-    def apply_clean_changes(self, changes):
-        """Apply renaming changes and collect errors."""
-        errors = []
-        for old_path, new_path, old_name, _ in changes:
-            try:
-                os.rename(old_path, new_path)
-            except OSError as e:
-                errors.append(f"Error renaming {old_name}: {str(e)}")
-        return errors
-        
-    def get_files_to_clean(self, list_widget, directory):
-        """Get list of files that need cleaning."""
-        changes = []
-        for index in range(list_widget.count()):
-            item = list_widget.item(index)
-            old_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
-            old_name = os.path.basename(old_path)
-            new_name = self.clean_filename(old_name)
-            
-            if new_name != old_name:
-                new_path = os.path.join(directory, new_name)
-                changes.append((old_path, new_path, old_name, new_name))
-        return changes
+    def update_size_indicator(self):
+        """Update the selected files size indicator."""
+        selected_files = self.get_selected_files(self.source_list)
+        total_size = sum(os.path.getsize(f) for f in selected_files)
+        self.size_label.setText(f"Selected: {self.human_readable_size(total_size)}")
 
     def find_duplicates(self):
         """Find duplicate files based on content hash."""
-        # Initialize progress dialog
-        progress = QtWidgets.QProgressDialog("Scanning files...", "Cancel", 0, 0, self)
-        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        selected_files = self.get_selected_files(self.source_list)
         
-        # Get list of files to scan
-        files_to_scan = []
-        if self.clean_source.isChecked():
-            for i in range(self.source_list.count()):
-                item = self.source_list.item(i)
-                files_to_scan.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
-                
-        if self.clean_dest.isChecked():
-            for i in range(self.dest_list.count()):
-                item = self.dest_list.item(i)
-                files_to_scan.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
-                
-        if not files_to_scan:
+        if not selected_files:
             QtWidgets.QMessageBox.warning(
-                self, "Warning",
-                "No directories selected for duplicate scanning"
+                self, "Warning", 
+                "Please select files to check for duplicates."
             )
             return
             
-        # Set up progress dialog
-        progress.setMaximum(len(files_to_scan))
+        # Initialize progress dialog
+        progress = QtWidgets.QProgressDialog("Scanning files...", "Cancel", 0, len(selected_files), self)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
         
         # Scan for duplicates
         duplicates = {}
-        files_processed = 0
+        current = 0
         
-        for file_path in files_to_scan:
+        for file_path in selected_files:
             if progress.wasCanceled():
                 break
                 
-            progress.setValue(files_processed)
-            progress.setLabelText(f"Scanning: {os.path.basename(file_path)}")
-            
             try:
                 file_hash = self.get_file_hash(file_path)
                 if file_hash in duplicates:
@@ -400,18 +350,32 @@ class FileCopyWindow(QtWidgets.QMainWindow):
             except OSError as e:
                 QtWidgets.QMessageBox.warning(
                     self, "Error",
-                    f"Could not scan {file_path}: {str(e)}"
+                    str(e)
                 )
                 
-            files_processed += 1
+            current += 1
+            progress.setValue(current)
             
         progress.close()
         
-        # Filter out unique files
+        # Filter out non-duplicates
         duplicates = {k: v for k, v in duplicates.items() if len(v) > 1}
         
-        # Show results dialog
-        self.handle_duplicates(duplicates)
+        if duplicates:
+            self.handle_duplicates(duplicates)
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "No Duplicates",
+                "No duplicate files were found."
+            )
+
+    def get_file_hash(self, file_path):
+        """Calculate MD5 hash of a file."""
+        try:
+            with open(file_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        except OSError as e:
+            raise OSError(f"Could not read {os.path.basename(file_path)}: {str(e)}")
 
     def handle_duplicates(self, duplicates):
         """Show dialog to handle duplicate files."""
@@ -427,25 +391,123 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         dialog.setWindowTitle("Duplicate Files Found")
         layout = QtWidgets.QVBoxLayout(dialog)
         
-        # Add list widget
-        list_widget = QtWidgets.QListWidget()
+        # Add tree widget for grouped display
+        tree = QtWidgets.QTreeWidget()
+        tree.setHeaderLabels(["File", "Size", "Modified", "Path", "Delete"])
+        tree.setAlternatingRowColors(True)
+        layout.addWidget(tree)
+        
+        # Populate tree with duplicate groups
         for hash_value, files in duplicates.items():
-            for file_path in files:
-                item = QtWidgets.QListWidgetItem(file_path)
-                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(QtCore.Qt.CheckState.Checked)
-                list_widget.addItem(item)
-        layout.addWidget(list_widget)
+            # Sort files by modification time (newest first)
+            files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+            
+            # Create group item
+            group = QtWidgets.QTreeWidgetItem(tree)
+            group.setText(0, f"Duplicate Group ({len(files)} files)")
+            group.setExpanded(True)
+            
+            # Add select all checkbox for group
+            group_checkbox = QtWidgets.QCheckBox()
+            tree.setItemWidget(group, 4, group_checkbox)
+            
+            # Add files to group
+            group_items = []
+            for i, file_path in enumerate(files):
+                item = QtWidgets.QTreeWidgetItem(group)
+                
+                # Get file info
+                stats = os.stat(file_path)
+                size = self.human_readable_size(stats.st_size)
+                mtime = datetime.fromtimestamp(stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Set item data
+                item.setText(0, os.path.basename(file_path))
+                item.setText(1, size)
+                item.setText(2, mtime)
+                item.setText(3, os.path.dirname(file_path))
+                
+                # Add checkbox (auto-select all except newest)
+                checkbox = QtWidgets.QCheckBox()
+                checkbox.setChecked(i > 0)  # Select all except the first (newest) file
+                tree.setItemWidget(item, 4, checkbox)
+                
+                # Store full path
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, file_path)
+                group_items.append((item, checkbox))
+                
+                # Set colors based on keep/delete status
+                def update_colors(state):
+                    if state:
+                        # Red background with black text for files to delete
+                        for col in range(4):
+                            item.setBackground(col, QtGui.QColor(255, 200, 200))
+                            item.setForeground(col, QtGui.QColor(0, 0, 0))
+                    else:
+                        # Green background with black text for files to keep
+                        for col in range(4):
+                            item.setBackground(col, QtGui.QColor(200, 255, 200))
+                            item.setForeground(col, QtGui.QColor(0, 0, 0))
+                            
+                # Set initial colors
+                update_colors(checkbox.isChecked())
+                
+                # Update colors when checkbox changes
+                checkbox.stateChanged.connect(update_colors)
+            
+            # Connect group checkbox to control all items in group
+            def update_group_items(state):
+                for item, cb in group_items:
+                    cb.setChecked(state)
+            group_checkbox.stateChanged.connect(update_group_items)
+        
+        # Add select/deselect all button
+        select_layout = QtWidgets.QHBoxLayout()
+        select_all = QtWidgets.QPushButton("Select All")
+        deselect_all = QtWidgets.QPushButton("Deselect All")
+        invert_selection = QtWidgets.QPushButton("Invert Selection")
+        
+        def update_selection(checked):
+            root = tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                group = root.child(i)
+                group_widget = tree.itemWidget(group, 4)
+                if group_widget:
+                    group_widget.setChecked(checked)
+                for j in range(group.childCount()):
+                    item = group.child(j)
+                    widget = tree.itemWidget(item, 4)
+                    if widget:
+                        widget.setChecked(checked)
+                        
+        def invert_current_selection():
+            root = tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                group = root.child(i)
+                for j in range(group.childCount()):
+                    item = group.child(j)
+                    widget = tree.itemWidget(item, 4)
+                    if widget:
+                        widget.setChecked(not widget.isChecked())
+        
+        select_all.clicked.connect(lambda: update_selection(True))
+        deselect_all.clicked.connect(lambda: update_selection(False))
+        invert_selection.clicked.connect(invert_current_selection)
+        
+        select_layout.addWidget(select_all)
+        select_layout.addWidget(deselect_all)
+        select_layout.addWidget(invert_selection)
+        layout.addLayout(select_layout)
         
         # Add buttons
         button_layout = QtWidgets.QHBoxLayout()
         
-        remove_button = QtWidgets.QPushButton("Remove Selected")
-        remove_button.clicked.connect(lambda: self.process_duplicates(list_widget, "remove", dialog))
-        button_layout.addWidget(remove_button)
+        delete_button = QtWidgets.QPushButton("Delete Selected")
+        delete_button.clicked.connect(lambda: self.process_duplicates_tree(tree, "remove", dialog))
+        button_layout.addWidget(delete_button)
         
         move_button = QtWidgets.QPushButton("Move Selected")
-        move_button.clicked.connect(lambda: self.process_duplicates(list_widget, "move", dialog))
+        move_button.clicked.connect(lambda: self.process_duplicates_tree(tree, "move", dialog))
         button_layout.addWidget(move_button)
         
         cancel_button = QtWidgets.QPushButton("Cancel")
@@ -455,17 +517,24 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         layout.addLayout(button_layout)
         
         # Show dialog
-        dialog.resize(600, 400)
+        dialog.resize(800, 600)
         dialog.exec()
         
-    def process_duplicates(self, list_widget, action, dialog):
-        """Process selected duplicate files."""
+    def process_duplicates_tree(self, tree, action, dialog):
+        """Process selected duplicate files from tree widget."""
         selected_files = []
-        for i in range(list_widget.count()):
-            item = list_widget.item(i)
-            if item.checkState() == QtCore.Qt.CheckState.Checked:
-                selected_files.append(item.text())
-                
+        root = tree.invisibleRootItem()
+        
+        # Collect selected files
+        for i in range(root.childCount()):
+            group = root.child(i)
+            for j in range(group.childCount()):
+                item = group.child(j)
+                checkbox = tree.itemWidget(item, 4)
+                if checkbox and checkbox.isChecked():
+                    file_path = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                    selected_files.append(file_path)
+                    
         if not selected_files:
             QtWidgets.QMessageBox.warning(
                 self, "Warning",
@@ -675,16 +744,19 @@ class FileCopyWindow(QtWidgets.QMainWindow):
 
     def copy_selected_files(self):
         """Copy selected files to destination."""
-        selected_items = self.source_list.selectedItems()
-        if not selected_items:
-            QtWidgets.QMessageBox.warning(self, "Warning", "No files selected")
+        selected_files = self.get_selected_files(self.source_list)
+        
+        if not selected_files:
+            QtWidgets.QMessageBox.warning(
+                self, "No Files Selected",
+                "Please select files to copy."
+            )
             return
             
         # Calculate total size
         files_to_copy = []
         total_size = 0
-        for item in selected_items:
-            file_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        for file_path in selected_files:
             try:
                 size = os.path.getsize(file_path)
                 total_size += size
@@ -812,18 +884,148 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         
         return f"{base}{ext}"
 
-    def update_size_indicator(self):
-        """Update the selected size indicator."""
-        total_size = 0
-        for item in self.source_list.selectedItems():
+    def update_free_space(self):
+        """Update free space indicator for destination directory."""
+        try:
+            if os.path.exists(self.dest_directory):
+                _, _, free = shutil.disk_usage(self.dest_directory)
+                self.destination_free_space = free
+                free_text = self.human_readable_size(free)
+                self.free_space_label.setText(f"Free space: {free_text}")
+        except OSError:
+            self.free_space_label.setText("Free space: Error")
+            self.destination_free_space = 0
+
+    def get_free_space(self, path):
+        """Get free space in bytes for the given path."""
+        try:
+            return shutil.disk_usage(path).free
+        except OSError:
+            return 0
+
+    def human_readable_size(self, size):
+        """Convert size in bytes to human readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} PB"
+
+    def browse_directory(self, target):
+        """Open a directory browser dialog."""
+        # Get current path from the appropriate text box
+        current_path = self.source_path.text() if target == "source" else self.dest_path.text()
+        
+        # If path doesn't exist, start from parent directory that does exist
+        while current_path and not os.path.exists(current_path):
+            current_path = os.path.dirname(current_path)
+            
+        # If no valid path found, use current directory
+        if not current_path:
+            current_path = os.getcwd()
+            
+        dialog = QtWidgets.QFileDialog()
+        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setDirectory(current_path)
+        
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            selected_dir = dialog.selectedFiles()[0]
+            if target == "source":
+                self.source_directory = selected_dir
+                self.source_path.setText(selected_dir)
+                self.load_source_files()
+            else:
+                self.dest_directory = selected_dir
+                self.dest_path.setText(selected_dir)
+                self.load_dest_files()
+                self.update_free_space()
+
+    def clean_selected_directory(self):
+        """Clean filenames in selected directories."""
+        if not (self.clean_source.isChecked() or self.clean_dest.isChecked()):
+            QtWidgets.QMessageBox.warning(self, "Warning", "Please select at least one directory to clean")
+            return
+            
+        changes = []
+        errors = []
+        
+        if self.clean_source.isChecked():
+            changes.extend(self.get_files_to_clean(self.source_list, self.source_directory))
+            
+        if self.clean_dest.isChecked():
+            changes.extend(self.get_files_to_clean(self.dest_list, self.dest_directory))
+            
+        if not changes:
+            QtWidgets.QMessageBox.information(self, "Clean Names", "No files need cleaning.")
+            return
+            
+        # Show confirmation dialog
+        msg = self.build_clean_message(changes)
+        if not self.confirm_clean(msg):
+            return
+            
+        # Apply changes and refresh
+        errors = self.apply_clean_changes(changes)
+        
+        # Refresh lists
+        if self.clean_source.isChecked():
+            self.load_source_files()
+        if self.clean_dest.isChecked():
+            self.load_dest_files()
+            self.update_free_space()
+            
+        self.show_clean_results(len(changes), errors)
+            
+    def build_clean_message(self, changes):
+        """Build message showing files to be renamed."""
+        msg = "The following files will be renamed:\n\n"
+        for _, _, old_name, new_name in changes[:10]:
+            msg += f"{old_name} → {new_name}\n"
+        if len(changes) > 10:
+            msg += f"\n...and {len(changes) - 10} more files"
+        return msg
+        
+    def confirm_clean(self, msg):
+        """Show confirmation dialog and return user's choice."""
+        response = QtWidgets.QMessageBox.question(
+            self, "Confirm Rename",
+            msg,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        return response == QtWidgets.QMessageBox.StandardButton.Yes
+        
+    def apply_clean_changes(self, changes):
+        """Apply renaming changes and collect errors."""
+        errors = []
+        for old_path, new_path, old_name, _ in changes:
             try:
-                file_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
-                total_size += os.path.getsize(file_path)
-            except OSError:
-                continue
-                
-        size_text = self.human_readable_size(total_size)
-        self.selected_size_label.setText(f"Selected: {size_text}")
+                os.rename(old_path, new_path)
+            except OSError as e:
+                errors.append(f"Error renaming {old_name}: {str(e)}")
+        return errors
+        
+    def get_files_to_clean(self, list_widget, directory):
+        """Get list of files that need cleaning."""
+        changes = []
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            old_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            old_name = os.path.basename(old_path)
+            new_name = self.clean_filename(old_name)
+            
+            if new_name != old_name:
+                new_path = os.path.join(directory, new_name)
+                changes.append((old_path, new_path, old_name, new_name))
+        return changes
+
+    def show_clean_results(self, num_changes, errors):
+        """Show results of cleaning operation."""
+        if errors:
+            msg = f"Cleaned {num_changes - len(errors)} files, {len(errors)} errors occurred."
+        else:
+            msg = f"Cleaned {num_changes} files."
+        QtWidgets.QMessageBox.information(self, "Clean Names", msg)
 
     def source_path_changed(self, path):
         """Handle source path text changes."""
@@ -837,64 +1039,110 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         self.update_free_space()
 
     def show_rename_dialog(self):
-        """Show dialog for renaming files with regex pattern."""
+        """Show dialog for renaming files."""
+        # Get selected files
+        selected_files = []
+        for i in range(self.source_list.count()):
+            item = self.source_list.item(i)
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                file_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                selected_files.append(file_path)
+                
+        if not selected_files:
+            QtWidgets.QMessageBox.warning(
+                self, "No Files Selected",
+                "Please select files to rename."
+            )
+            return
+            
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Rename Files")
         layout = QtWidgets.QVBoxLayout(dialog)
         
-        # Rename type selection
-        type_group = QtWidgets.QButtonGroup(dialog)
-        single_radio = QtWidgets.QRadioButton("Rename Single File")
-        pattern_radio = QtWidgets.QRadioButton("Rename Using Pattern")
-        single_radio.setChecked(True)
-        type_group.addButton(single_radio)
-        type_group.addButton(pattern_radio)
+        # Add description
+        layout.addWidget(QtWidgets.QLabel("Search and Replace Pattern:"))
         
-        layout.addWidget(single_radio)
-        layout.addWidget(pattern_radio)
-        
-        # Pattern inputs
-        pattern_widget = QtWidgets.QWidget()
-        pattern_layout = QtWidgets.QFormLayout(pattern_widget)
-        
+        # Add search pattern input
+        search_layout = QtWidgets.QHBoxLayout()
+        search_layout.addWidget(QtWidgets.QLabel("Search:"))
         search_pattern = QtWidgets.QLineEdit()
+        search_layout.addWidget(search_pattern)
+        layout.addLayout(search_layout)
+        
+        # Add replace pattern input
+        replace_layout = QtWidgets.QHBoxLayout()
+        replace_layout.addWidget(QtWidgets.QLabel("Replace:"))
         replace_pattern = QtWidgets.QLineEdit()
+        replace_layout.addWidget(replace_pattern)
+        layout.addLayout(replace_layout)
         
-        pattern_layout.addRow("Search Pattern:", search_pattern)
-        pattern_layout.addRow("Replace Pattern:", replace_pattern)
+        # Add preview list
+        preview_list = QtWidgets.QListWidget()
+        layout.addWidget(QtWidgets.QLabel("Preview:"))
+        layout.addWidget(preview_list)
         
-        # Single file input
-        single_widget = QtWidgets.QWidget()
-        single_layout = QtWidgets.QFormLayout(single_widget)
-        new_name = QtWidgets.QLineEdit()
-        single_layout.addRow("New Name:", new_name)
+        def update_preview():
+            preview_list.clear()
+            search_text = search_pattern.text()
+            replace_text = replace_pattern.text()
+            
+            for file_path in selected_files:
+                old_name = os.path.basename(file_path)
+                new_name = old_name.replace(search_text, replace_text) if search_text else old_name
+                item = QtWidgets.QListWidgetItem(f"{old_name} → {new_name}")
+                preview_list.addItem(item)
+                
+        search_pattern.textChanged.connect(update_preview)
+        replace_pattern.textChanged.connect(update_preview)
+        update_preview()
         
-        layout.addWidget(single_widget)
-        layout.addWidget(pattern_widget)
-        pattern_widget.hide()
-        
-        # Connect radio buttons
-        single_radio.toggled.connect(lambda checked: (
-            single_widget.setVisible(checked),
-            pattern_widget.setVisible(not checked)
-        ))
-        
-        # Buttons
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+        # Add buttons
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | 
             QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
         
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            if single_radio.isChecked():
-                if new_name.text():
-                    self.rename_selected_file(new_name.text())
-            else:
-                if search_pattern.text():
-                    self.rename_files_pattern(search_pattern.text(), replace_pattern.text())
+        def do_rename():
+            search_text = search_pattern.text()
+            replace_text = replace_pattern.text()
+            
+            if not search_text:
+                QtWidgets.QMessageBox.warning(
+                    dialog, "Invalid Pattern",
+                    "Please enter a search pattern."
+                )
+                return
+                
+            for file_path in selected_files:
+                try:
+                    directory = os.path.dirname(file_path)
+                    old_name = os.path.basename(file_path)
+                    new_name = old_name.replace(search_text, replace_text)
+                    new_path = os.path.join(directory, new_name)
+                    
+                    if os.path.exists(new_path) and new_path != file_path:
+                        QtWidgets.QMessageBox.warning(
+                            dialog, "Error",
+                            f"Cannot rename {old_name}: {new_name} already exists."
+                        )
+                        continue
+                        
+                    os.rename(file_path, new_path)
+                except OSError as e:
+                    QtWidgets.QMessageBox.warning(
+                        dialog, "Error",
+                        f"Could not rename {old_name}: {str(e)}"
+                    )
+                    
+            self.load_source_files()
+            dialog.accept()
+            
+        button_box.accepted.connect(do_rename)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.setMinimumWidth(500)
+        dialog.exec()
 
     def rename_files_pattern(self, search_pattern, replace_pattern):
         """Rename multiple files using regex pattern."""
@@ -976,6 +1224,16 @@ class FileCopyWindow(QtWidgets.QMainWindow):
                 
         except OSError as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Could not rename file: {str(e)}")
+
+    def on_source_item_changed(self, item):
+        """Handle source item checkbox changes."""
+        self.update_size_indicator()
+        # Update toggle state based on all items
+        all_checked = all(
+            self.source_list.item(i).checkState() == QtCore.Qt.CheckState.Checked
+            for i in range(self.source_list.count())
+        )
+        self.source_toggle.setChecked(all_checked)
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
