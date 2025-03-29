@@ -17,26 +17,50 @@ import fnmatch
 
 class FileCopyWindow(QtWidgets.QMainWindow):
     """Main window for the file copy application."""
+    # Constants
+    SELECT_BY_PATTERN_TEXT = "Select by Pattern"
+    DEFAULT_SOURCE_PATH = "/media/thoth/Jalpaite/ROMS/"
+    DEFAULT_DEST_PATH = "/media/peter/"
+    
     def __init__(self):
         super().__init__()
         
         # Initialize directories with defaults, fallback to current directory
-        default_source = "/media/thoth/Jalpaite/ROMS/"
-        default_dest = "/media/peter/"
         current_dir = os.getcwd()
         
         # Try default source, fallback to current directory
         self.source_directory = (
-            default_source if os.path.exists(default_source) else current_dir
+            self.DEFAULT_SOURCE_PATH if os.path.exists(self.DEFAULT_SOURCE_PATH) else current_dir
         )
         
         # Try default destination, fallback to current directory
         self.dest_directory = (
-            default_dest if os.path.exists(default_dest) else current_dir
+            self.DEFAULT_DEST_PATH if os.path.exists(self.DEFAULT_DEST_PATH) else current_dir
         )
         
         self.destination_free_space = 0
-        self.extensions = ["All", ".mp3", ".flac", ".wav", ".m4a", ".ogg"]
+        self.extensions = [
+            "All",
+            ".zip",
+            ".7z",
+            ".rar",
+            ".bin",
+            ".iso",
+            ".dsk",
+            ".d64",
+            ".gba",  # Game Boy Advance
+            ".nds",  # Nintendo DS
+            ".smc",  # Super Nintendo
+            ".nes",  # Nintendo
+            ".n64",  # Nintendo 64
+            ".z64",  # Nintendo 64 (alt)
+            ".gb",   # Game Boy
+            ".gbc",  # Game Boy Color
+            ".gen",  # Genesis
+            ".smd",  # Genesis/Mega Drive
+            ".cue",  # CD image
+            ".chd",  # Compressed CD image
+        ]
         
         # Initialize UI
         self.setup_ui()
@@ -93,6 +117,7 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         source_path_layout = QtWidgets.QHBoxLayout()
         self.source_path = QtWidgets.QLineEdit()
         self.source_path.setReadOnly(True)
+        self.source_path.setText(self.source_directory)  # Set initial source path
         source_path_layout.addWidget(self.source_path)
         
         source_browse = QtWidgets.QPushButton("Browse")
@@ -108,8 +133,8 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         self.source_toggle.stateChanged.connect(self.toggle_source_selection)
         source_toggle_layout.addWidget(self.source_toggle)
         
-        self.pattern_button = QtWidgets.QPushButton("Select by Pattern")
-        self.pattern_button.clicked.connect(self.select_by_pattern)
+        self.pattern_button = QtWidgets.QPushButton(self.SELECT_BY_PATTERN_TEXT)
+        self.pattern_button.clicked.connect(lambda: self.select_by_pattern("source"))
         source_toggle_layout.addWidget(self.pattern_button)
         
         source_toggle_layout.addStretch()
@@ -158,6 +183,11 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         dest_toggle_layout = QtWidgets.QHBoxLayout()
         self.dest_toggle = QtWidgets.QCheckBox("Select All")
         dest_toggle_layout.addWidget(self.dest_toggle)
+        
+        self.dest_pattern_button = QtWidgets.QPushButton(self.SELECT_BY_PATTERN_TEXT)
+        self.dest_pattern_button.clicked.connect(lambda: self.select_by_pattern("destination"))
+        dest_toggle_layout.addWidget(self.dest_pattern_button)
+        
         dest_toggle_layout.addStretch()
         dest_list_layout.addLayout(dest_toggle_layout)
         
@@ -820,23 +850,31 @@ class FileCopyWindow(QtWidgets.QMainWindow):
             size /= 1024
         return f"{size:.1f} PB"
 
+    def _resolve_browse_path(self, target, current_path):
+        """Resolve the starting path for directory browsing."""
+        # For source, try to use the default ROMS directory if current path is empty or invalid
+        if target == "source" and (not current_path or not os.path.exists(current_path)):
+            return self.DEFAULT_SOURCE_PATH if os.path.exists(self.DEFAULT_SOURCE_PATH) else os.getcwd()
+            
+        # For other paths, walk up until we find a valid directory
+        while current_path and not os.path.exists(current_path):
+            current_path = os.path.dirname(current_path)
+            
+        # If no valid path found, use current directory
+        return current_path if current_path else os.getcwd()
+
     def browse_directory(self, target):
         """Open directory browser dialog."""
         # Get current path from the appropriate text box
         current_path = self.source_path.text() if target == "source" else self.dest_path.text()
         
-        # If path doesn't exist, start from parent directory that does exist
-        while current_path and not os.path.exists(current_path):
-            current_path = os.path.dirname(current_path)
-            
-        # If no valid path found, use current directory
-        if not current_path:
-            current_path = os.getcwd()
+        # Resolve the starting path
+        resolved_path = self._resolve_browse_path(target, current_path)
             
         dialog = QtWidgets.QFileDialog()
         dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
         dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setDirectory(current_path)
+        dialog.setDirectory(resolved_path)
         
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             selected_dir = dialog.selectedFiles()[0]
@@ -1053,37 +1091,39 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         dialog.setMinimumWidth(500)
         dialog.exec()
 
-    def select_by_pattern(self):
+    def select_by_pattern(self, side="source"):
         """Select files matching a regex pattern."""
         pattern, ok = QtWidgets.QInputDialog.getText(
-            self, "Select by Pattern",
-            "Enter regex pattern (e.g. [0-9]+ for numbers):"
+            self,
+            self.SELECT_BY_PATTERN_TEXT,
+            "Enter regex pattern:"
         )
         
         if ok and pattern:
             try:
                 regex = re.compile(pattern)
-                # Track if any items matched
-                matched = False
+                list_widget = self.source_list if side == "source" else self.dest_list
                 
-                for i in range(self.source_list.count()):
-                    item = self.source_list.item(i)
-                    filename = os.path.basename(item.data(QtCore.Qt.ItemDataRole.UserRole))
-                    if regex.search(filename):
+                # Clear current selection
+                for i in range(list_widget.count()):
+                    item = list_widget.item(i)
+                    item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+                
+                # Select matching items
+                for i in range(list_widget.count()):
+                    item = list_widget.item(i)
+                    if regex.search(item.text()):
                         item.setCheckState(QtCore.Qt.CheckState.Checked)
-                        matched = True
-                    else:
-                        item.setCheckState(QtCore.Qt.CheckState.Unchecked)
                 
-                if not matched:
-                    QtWidgets.QMessageBox.information(
-                        self, "No Matches",
-                        f"No files matched the pattern: {pattern}"
-                    )
+                # Update size indicator if source side
+                if side == "source":
+                    self.update_size_indicator()
+                
             except re.error as e:
-                QtWidgets.QMessageBox.critical(
-                    self, "Invalid Pattern",
-                    f"Invalid regex pattern: {str(e)}"
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid Pattern",
+                    f"Invalid regular expression: {str(e)}"
                 )
 
     def toggle_source_selection(self, state):
@@ -1147,25 +1187,34 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         self.source_toggle.setChecked(all_checked)
 
     def delete_selected_files(self):
-        """Delete selected files from source directory."""
-        selected_files = self.get_selected_files(self.source_list)
+        """Delete selected files from source and/or destination directories."""
+        # Get selected files from both sides
+        source_files = self.get_selected_files(self.source_list)
+        dest_files = self.get_selected_files(self.dest_list)
         
-        if not selected_files:
+        if not source_files and not dest_files:
             QtWidgets.QMessageBox.warning(
-                self, "Warning", 
-                "Please select files to delete."
+                self, "Warning",
+                "No files selected for deletion"
             )
             return
             
+        # Build list of files to delete with their source
+        files_to_delete = []
+        if source_files:
+            files_to_delete.extend((f, "source") for f in source_files)
+        if dest_files:
+            files_to_delete.extend((f, "destination") for f in dest_files)
+            
         # Show custom confirmation dialog
-        dialog = DeleteConfirmDialog(selected_files, self)
+        dialog = DeleteConfirmDialog([f[0] for f in files_to_delete], self)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             errors = []
-            for file_path in selected_files:
+            for file_path, source in files_to_delete:
                 try:
                     os.remove(file_path)
                 except OSError as e:
-                    errors.append(f"Could not delete {os.path.basename(file_path)}: {str(e)}")
+                    errors.append(f"Could not delete {os.path.basename(file_path)} from {source}: {str(e)}")
             
             # Show any errors in a scrollable dialog
             if errors:
@@ -1192,8 +1241,10 @@ class FileCopyWindow(QtWidgets.QMainWindow):
                 
                 error_dialog.exec()
             
-            # Refresh the source list
+            # Refresh both lists and update space
             self.load_source_files()
+            self.load_dest_files()
+            self.update_free_space()
 
 class DeleteConfirmDialog(QtWidgets.QDialog):
     """Custom dialog for confirming file deletion with scrollable area."""
