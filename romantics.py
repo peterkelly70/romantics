@@ -13,6 +13,7 @@ import mimetypes
 from PIL import Image
 import mutagen
 import ffmpeg
+import fnmatch
 
 class FileCopyWindow(QtWidgets.QMainWindow):
     """Main window for the file copy application."""
@@ -73,6 +74,8 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         ]
         self.rom_regex = re.compile('|'.join(self.rom_patterns), re.IGNORECASE)
         
+        self._space_pressed = False  # Track space key state
+        
     def setup_ui(self):
         """Set up the user interface."""
         central_widget = QtWidgets.QWidget()
@@ -86,10 +89,10 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         source_group = QtWidgets.QGroupBox("Source")
         source_layout = QtWidgets.QVBoxLayout(source_group)
         
+        # Source path
         source_path_layout = QtWidgets.QHBoxLayout()
         self.source_path = QtWidgets.QLineEdit()
         self.source_path.setReadOnly(True)
-        self.source_path.setText(self.source_directory)
         source_path_layout.addWidget(self.source_path)
         
         source_browse = QtWidgets.QPushButton("Browse")
@@ -97,41 +100,27 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         source_path_layout.addWidget(source_browse)
         source_layout.addLayout(source_path_layout)
         
-        # Source list with select all toggle
+        # Source list with select all and pattern toggles
         source_list_layout = QtWidgets.QVBoxLayout()
         source_toggle_layout = QtWidgets.QHBoxLayout()
+        
         self.source_toggle = QtWidgets.QCheckBox("Select All")
+        self.source_toggle.stateChanged.connect(self.toggle_source_selection)
         source_toggle_layout.addWidget(self.source_toggle)
+        
+        self.pattern_button = QtWidgets.QPushButton("Select by Pattern")
+        self.pattern_button.clicked.connect(self.select_by_pattern)
+        source_toggle_layout.addWidget(self.pattern_button)
+        
         source_toggle_layout.addStretch()
         source_list_layout.addLayout(source_toggle_layout)
         
         self.source_list = QtWidgets.QListWidget()
         self.source_list.itemChanged.connect(self.on_source_item_changed)
         self.source_list.setSelectionMode(QtWidgets.QListWidget.SelectionMode.ExtendedSelection)
+        self.source_list.installEventFilter(self)  # Install event filter for keyboard handling
         source_list_layout.addWidget(self.source_list)
         source_layout.addLayout(source_list_layout)
-        
-        def toggle_source_selection(state):
-            for i in range(self.source_list.count()):
-                item = self.source_list.item(i)
-                item.setCheckState(
-                    QtCore.Qt.CheckState.Checked if state 
-                    else QtCore.Qt.CheckState.Unchecked
-                )
-            self.update_size_indicator()
-            
-        # Connect source list item changes to update size
-        def on_source_item_changed(item):
-            self.update_size_indicator()
-            # Update toggle state based on all items
-            all_checked = all(
-                self.source_list.item(i).checkState() == QtCore.Qt.CheckState.Checked
-                for i in range(self.source_list.count())
-            )
-            self.source_toggle.setChecked(all_checked)
-            
-        self.source_list.itemChanged.connect(on_source_item_changed)
-        self.source_toggle.stateChanged.connect(toggle_source_selection)
         
         # Extension filter
         filter_layout = QtWidgets.QHBoxLayout()
@@ -219,6 +208,10 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         copy_button = QtWidgets.QPushButton("Copy Selected")
         copy_button.clicked.connect(self.copy_selected_files)
         action_layout.addWidget(copy_button)
+        
+        delete_button = QtWidgets.QPushButton("Delete Selected")
+        delete_button.clicked.connect(self.delete_selected_files)
+        action_layout.addWidget(delete_button)
         
         clean_button = QtWidgets.QPushButton("Clean Names")
         clean_button.clicked.connect(self.clean_selected_directory)
@@ -591,156 +584,67 @@ class FileCopyWindow(QtWidgets.QMainWindow):
                 sha256_hash.update(byte_block)
         return sha256_hash.hexdigest()
 
+    class CopyWorker(QtCore.QThread):
+        """Worker thread for copying files."""
+        progress = QtCore.pyqtSignal(int)
+        finished = QtCore.pyqtSignal()
+        error = QtCore.pyqtSignal(str)
+        
+        def __init__(self, files, dest_dir):
+            super().__init__()
+            self.files = files
+            self.dest_dir = dest_dir
+            self.cancelled = False
+            
+        def run(self):
+            """Copy files to destination directory."""
+            try:
+                total = len(self.files)
+                for i, (src, _) in enumerate(self.files):
+                    if self.cancelled:
+                        break
+                        
+                    try:
+                        dest = os.path.join(self.dest_dir, os.path.basename(src))
+                        shutil.copy2(src, dest)
+                        self.progress.emit(int((i + 1) * 100 / total))
+                    except OSError as e:
+                        self.error.emit(f"Error copying {os.path.basename(src)}: {str(e)}")
+                        
+            finally:
+                self.finished.emit()
+                
+        def cancel(self):
+            """Cancel the copy operation."""
+            self.cancelled = True
+
     class CopyProgressDialog(QtWidgets.QDialog):
         """Dialog showing copy progress."""
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setWindowTitle("Copying Files")
             self.setModal(True)
+            self.setup_ui()
+            
+        def setup_ui(self):
+            """Set up the progress dialog UI."""
             layout = QtWidgets.QVBoxLayout(self)
             
-            # Current file progress
-            self.current_file_label = QtWidgets.QLabel("Preparing...")
-            layout.addWidget(self.current_file_label)
-            
-            self.file_progress = QtWidgets.QProgressBar()
-            layout.addWidget(self.file_progress)
-            
-            self.file_speed_label = QtWidgets.QLabel("Speed: 0 B/s")
-            layout.addWidget(self.file_speed_label)
-            
-            # Overall progress
-            self.total_progress = QtWidgets.QProgressBar()
-            layout.addWidget(self.total_progress)
-            
-            self.total_files_label = QtWidgets.QLabel("Files: 0/0")
-            layout.addWidget(self.total_files_label)
+            # Progress bar
+            self.progress_bar = QtWidgets.QProgressBar()
+            self.progress_bar.setRange(0, 100)
+            layout.addWidget(self.progress_bar)
             
             # Cancel button
+            button_layout = QtWidgets.QHBoxLayout()
             self.cancel_button = QtWidgets.QPushButton("Cancel")
-            layout.addWidget(self.cancel_button)
+            button_layout.addStretch()
+            button_layout.addWidget(self.cancel_button)
+            layout.addLayout(button_layout)
             
-            self.resize(400, 200)
-            
-        def update_file_progress(self, current, total, speed):
-            """Update current file progress."""
-            self.file_progress.setMaximum(total)
-            self.file_progress.setValue(current)
-            self.file_speed_label.setText(f"Speed: {speed}/s")
-            
-        def update_total_progress(self, copied, total, current_file):
-            """Update overall progress."""
-            self.total_progress.setMaximum(total)
-            self.total_progress.setValue(copied)
-            self.current_file_label.setText(f"Copying: {current_file}")
-            
-        def update_file_count(self, copied, total):
-            """Update file count."""
-            self.total_files_label.setText(f"Files: {copied}/{total}")
-
-    class CopyWorker(QtCore.QThread):
-        """Worker thread for copying files."""
-        file_progress = pyqtSignal(int, int, str)  # current bytes, total bytes, speed
-        total_progress = pyqtSignal(int, int, str)  # copied bytes, total bytes, current file
-        file_count = pyqtSignal(int, int)  # copied files, total files
-        finished = pyqtSignal()
-        error = pyqtSignal(str)
-        
-        def __init__(self, files, dest_dir):
-            super().__init__()
-            self.files = files  # List of (path, size) tuples
-            self.dest_dir = dest_dir
-            self.canceled = False
-            self.total_size = sum(size for _, size in files)
-            self.total_copied = 0
-            self.files_copied = 0
-            
-        def get_unique_dest_path(self, src_path):
-            """Get a unique destination path, appending numbers if needed."""
-            filename = os.path.basename(src_path)
-            dest_path = os.path.join(self.dest_dir, filename)
-            
-            if os.path.exists(dest_path):
-                base, ext = os.path.splitext(filename)
-                counter = 1
-                while os.path.exists(dest_path):
-                    new_name = f"{base}_{counter}{ext}"
-                    dest_path = os.path.join(self.dest_dir, new_name)
-                    counter += 1
-            
-            return dest_path
-            
-        def copy_file_with_progress(self, src_path, dest_path, file_size):
-            """Copy a single file with progress updates."""
-            file_copied = 0
-            last_update = time.time()
-            last_bytes = 0
-            
-            try:
-                with open(src_path, 'rb') as src, open(dest_path, 'wb') as dst:
-                    while chunk := src.read(65536):  # 64KB chunks
-                        if self.canceled:
-                            dst.close()
-                            os.remove(dest_path)
-                            return False
-                            
-                        dst.write(chunk)
-                        chunk_size = len(chunk)
-                        file_copied += chunk_size
-                        self.total_copied += chunk_size
-                        
-                        # Update progress every 100ms
-                        now = time.time()
-                        if now - last_update >= 0.1:
-                            speed = (file_copied - last_bytes) / (now - last_update)
-                            speed_str = self.format_speed(speed)
-                            filename = os.path.basename(src_path)
-                            
-                            self.file_progress.emit(file_copied, file_size, speed_str)
-                            self.total_progress.emit(self.total_copied, self.total_size, filename)
-                            
-                            last_update = now
-                            last_bytes = file_copied
-                
-                return True
-                
-            except OSError as e:
-                self.error.emit(f"Error copying {os.path.basename(src_path)}: {str(e)}")
-                if os.path.exists(dest_path):
-                    try:
-                        os.remove(dest_path)
-                    except OSError:
-                        pass
-                return False
-                
-        def format_speed(self, bytes_per_sec):
-            """Format transfer speed in human readable format."""
-            for unit in ['B', 'KB', 'MB', 'GB']:
-                if bytes_per_sec < 1024:
-                    return f"{bytes_per_sec:.1f} {unit}"
-                bytes_per_sec /= 1024
-            return f"{bytes_per_sec:.1f} TB"
-            
-        def run(self):
-            """Copy files in a separate thread."""
-            for src_path, file_size in self.files:
-                if self.canceled:
-                    break
-                    
-                dest_path = self.get_unique_dest_path(src_path)
-                
-                if self.copy_file_with_progress(src_path, dest_path, file_size):
-                    self.files_copied += 1
-                    self.file_count.emit(self.files_copied, len(self.files))
-                else:
-                    return
-            
-            if not self.canceled:
-                self.finished.emit()
-        
-        def cancel(self):
-            """Cancel the copy operation."""
-            self.canceled = True
+        def update_progress(self, value):
+            """Update progress bar value."""
+            self.progress_bar.setValue(value)
 
     def copy_selected_files(self):
         """Copy selected files to destination."""
@@ -748,50 +652,55 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         
         if not selected_files:
             QtWidgets.QMessageBox.warning(
-                self, "No Files Selected",
+                self, "Warning", 
                 "Please select files to copy."
             )
             return
             
-        # Calculate total size
-        files_to_copy = []
-        total_size = 0
-        for file_path in selected_files:
-            try:
-                size = os.path.getsize(file_path)
-                total_size += size
-                files_to_copy.append((file_path, size))
-            except OSError as e:
-                QtWidgets.QMessageBox.warning(
-                    self, "Error",
-                    f"Could not access file {os.path.basename(file_path)}: {str(e)}"
-                )
-                return
-                
-        # Check destination space
-        if total_size > self.destination_free_space:
-            QtWidgets.QMessageBox.critical(
-                self, "Error",
-                "Not enough space in destination directory"
+        if not self.dest_directory:
+            QtWidgets.QMessageBox.warning(
+                self, "Warning",
+                "Please select a destination directory."
             )
             return
             
-        # Create and start copy worker
-        self.copy_worker = CopyWorker(files_to_copy, self.dest_directory)
-        self.copy_progress = CopyProgressDialog(self)
+        # Prepare files list with sizes
+        files_to_copy = []
+        for file_path in selected_files:
+            try:
+                size = os.path.getsize(file_path)
+                files_to_copy.append((file_path, size))
+            except OSError as e:
+                QtWidgets.QMessageBox.critical(
+                    self, "Error",
+                    f"Could not access {os.path.basename(file_path)}: {str(e)}"
+                )
+                return
+                
+        # Create and set up worker
+        self.copy_worker = self.CopyWorker(files_to_copy, self.dest_directory)
+        
+        # Create and show progress dialog
+        progress_dialog = self.CopyProgressDialog(self)
         
         # Connect signals
-        self.copy_worker.file_progress.connect(self.copy_progress.update_file_progress)
-        self.copy_worker.total_progress.connect(self.copy_progress.update_total_progress)
-        self.copy_worker.file_count.connect(self.copy_progress.update_file_count)
-        self.copy_worker.finished.connect(self.copy_progress.accept)
+        self.copy_worker.progress.connect(progress_dialog.update_progress)
+        self.copy_worker.finished.connect(progress_dialog.accept)
         self.copy_worker.error.connect(lambda msg: QtWidgets.QMessageBox.critical(self, "Error", msg))
-        self.copy_progress.cancel_button.clicked.connect(self.copy_worker.cancel)
+        progress_dialog.cancel_button.clicked.connect(self.copy_worker.cancel)
         
-        # Start copying
+        # Start copying in background
         self.copy_worker.start()
-        self.copy_progress.exec()
         
+        # Show dialog and wait
+        progress_dialog.exec()
+        
+        # Clean up
+        if self.copy_worker:
+            self.copy_worker.wait()  # Wait for thread to finish
+            self.copy_worker.deleteLater()  # Clean up the worker
+            self.copy_worker = None
+            
         # Refresh lists after copy
         self.load_source_files()
         self.load_dest_files()
@@ -912,7 +821,7 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         return f"{size:.1f} PB"
 
     def browse_directory(self, target):
-        """Open a directory browser dialog."""
+        """Open directory browser dialog."""
         # Get current path from the appropriate text box
         current_path = self.source_path.text() if target == "source" else self.dest_path.text()
         
@@ -1144,86 +1053,88 @@ class FileCopyWindow(QtWidgets.QMainWindow):
         dialog.setMinimumWidth(500)
         dialog.exec()
 
-    def rename_files_pattern(self, search_pattern, replace_pattern):
-        """Rename multiple files using regex pattern."""
-        def rename_in_list(list_widget, directory):
-            """Rename files in the specified list."""
-            selected_items = list_widget.selectedItems()
-            if not selected_items:
-                return
+    def select_by_pattern(self):
+        """Select files matching a regex pattern."""
+        pattern, ok = QtWidgets.QInputDialog.getText(
+            self, "Select by Pattern",
+            "Enter regex pattern (e.g. [0-9]+ for numbers):"
+        )
+        
+        if ok and pattern:
+            try:
+                regex = re.compile(pattern)
+                # Track if any items matched
+                matched = False
                 
-            for item in selected_items:
-                old_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
-                old_name = os.path.basename(old_path)
-                try:
-                    new_name = re.sub(search_pattern, replace_pattern, old_name)
-                    if new_name != old_name:
-                        new_path = os.path.join(directory, new_name)
-                        if not os.path.exists(new_path):
-                            os.rename(old_path, new_path)
-                except (OSError, re.error) as e:
-                    QtWidgets.QMessageBox.critical(
-                        self, "Error",
-                        f"Error renaming {old_name}: {str(e)}"
+                for i in range(self.source_list.count()):
+                    item = self.source_list.item(i)
+                    filename = os.path.basename(item.data(QtCore.Qt.ItemDataRole.UserRole))
+                    if regex.search(filename):
+                        item.setCheckState(QtCore.Qt.CheckState.Checked)
+                        matched = True
+                    else:
+                        item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+                
+                if not matched:
+                    QtWidgets.QMessageBox.information(
+                        self, "No Matches",
+                        f"No files matched the pattern: {pattern}"
                     )
-        
-        if self.clean_source.isChecked():
-            rename_in_list(self.source_list, self.source_directory)
-            self.load_source_files()
-            
-        if self.clean_dest.isChecked():
-            rename_in_list(self.dest_list, self.dest_directory)
-            self.load_dest_files()
+            except re.error as e:
+                QtWidgets.QMessageBox.critical(
+                    self, "Invalid Pattern",
+                    f"Invalid regex pattern: {str(e)}"
+                )
 
-    def rename_selected_file(self, new_name=None):
-        """Rename a selected file in either source or destination."""
-        if self.clean_source.isChecked():
-            list_widget = self.source_list
-            directory = self.source_directory
-        elif self.clean_dest.isChecked():
-            list_widget = self.dest_list
-            directory = self.dest_directory
-        else:
-            QtWidgets.QMessageBox.warning(self, "Warning", "Please select a directory to rename")
-            return
-            
-        selected_items = list_widget.selectedItems()
-        if not selected_items:
-            QtWidgets.QMessageBox.warning(self, "Warning", "Please select a file to rename")
-            return
-            
-        if len(selected_items) > 1:
-            QtWidgets.QMessageBox.warning(self, "Warning", "Please select only one file to rename")
-            return
-            
-        item = selected_items[0]
-        old_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
-        old_name = os.path.basename(old_path)
-        
-        if new_name is None:
-            new_name, ok = QtWidgets.QInputDialog.getText(
-                self, "Rename File", "New name:", 
-                QtWidgets.QLineEdit.EchoMode.Normal, old_name
+    def toggle_source_selection(self, state):
+        """Toggle selection of all source files."""
+        for i in range(self.source_list.count()):
+            item = self.source_list.item(i)
+            item.setCheckState(
+                QtCore.Qt.CheckState.Checked if state 
+                else QtCore.Qt.CheckState.Unchecked
             )
-            
-            if not ok or not new_name:
-                return
-            
-        try:
-            new_path = os.path.join(directory, new_name)
-            if os.path.exists(new_path):
-                QtWidgets.QMessageBox.warning(self, "Error", "A file with that name already exists")
-                return
+        self.update_size_indicator()
+
+    def eventFilter(self, obj, event):
+        """Handle keyboard events for quick selection."""
+        if obj == self.source_list:
+            if event.type() == QtCore.QEvent.Type.KeyPress:
+                # Handle Delete key
+                if event.key() == QtCore.Qt.Key.Key_Delete:
+                    self.delete_selected_files()
+                    return True
                 
-            os.rename(old_path, new_path)
-            if self.clean_source.isChecked():
-                self.load_source_files()
-            else:
-                self.load_dest_files()
-                self.update_free_space()
+                # Track space key state
+                if event.key() == QtCore.Qt.Key.Key_Space:
+                    self._space_pressed = True
                 
-        except OSError as e:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not rename file: {str(e)}")
+                # Handle arrow keys while space is held
+                if self._space_pressed and event.key() in (QtCore.Qt.Key.Key_Up, QtCore.Qt.Key.Key_Down):
+                    current_item = self.source_list.currentItem()
+                    if current_item:
+                        # Toggle current item's check state
+                        current_state = current_item.checkState()
+                        new_state = QtCore.Qt.CheckState.Unchecked if current_state == QtCore.Qt.CheckState.Checked \
+                            else QtCore.Qt.CheckState.Checked
+                        current_item.setCheckState(new_state)
+                        
+                        # Move to next/previous item
+                        current_row = self.source_list.row(current_item)
+                        next_row = current_row + (1 if event.key() == QtCore.Qt.Key.Key_Down else -1)
+                        if 0 <= next_row < self.source_list.count():
+                            self.source_list.setCurrentRow(next_row)
+                            # Ensure the item is visible
+                            self.source_list.scrollToItem(self.source_list.item(next_row))
+                        
+                        return True  # Event handled
+                        
+            elif event.type() == QtCore.QEvent.Type.KeyRelease:
+                # Reset space key state
+                if event.key() == QtCore.Qt.Key.Key_Space:
+                    self._space_pressed = False
+                    
+        return super().eventFilter(obj, event)
 
     def on_source_item_changed(self, item):
         """Handle source item checkbox changes."""
@@ -1234,6 +1145,96 @@ class FileCopyWindow(QtWidgets.QMainWindow):
             for i in range(self.source_list.count())
         )
         self.source_toggle.setChecked(all_checked)
+
+    def delete_selected_files(self):
+        """Delete selected files from source directory."""
+        selected_files = self.get_selected_files(self.source_list)
+        
+        if not selected_files:
+            QtWidgets.QMessageBox.warning(
+                self, "Warning", 
+                "Please select files to delete."
+            )
+            return
+            
+        # Show custom confirmation dialog
+        dialog = DeleteConfirmDialog(selected_files, self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            errors = []
+            for file_path in selected_files:
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    errors.append(f"Could not delete {os.path.basename(file_path)}: {str(e)}")
+            
+            # Show any errors in a scrollable dialog
+            if errors:
+                error_dialog = QtWidgets.QDialog(self)
+                error_dialog.setWindowTitle("Deletion Errors")
+                error_dialog.setModal(True)
+                error_dialog.resize(500, 300)
+                
+                layout = QtWidgets.QVBoxLayout(error_dialog)
+                
+                error_label = QtWidgets.QLabel("Errors occurred while deleting files:")
+                layout.addWidget(error_label)
+                
+                error_text = QtWidgets.QTextEdit()
+                error_text.setReadOnly(True)
+                error_text.setText("\n".join(errors))
+                layout.addWidget(error_text)
+                
+                button_box = QtWidgets.QDialogButtonBox(
+                    QtWidgets.QDialogButtonBox.StandardButton.Ok
+                )
+                button_box.accepted.connect(error_dialog.accept)
+                layout.addWidget(button_box)
+                
+                error_dialog.exec()
+            
+            # Refresh the source list
+            self.load_source_files()
+
+class DeleteConfirmDialog(QtWidgets.QDialog):
+    """Custom dialog for confirming file deletion with scrollable area."""
+    def __init__(self, files, parent=None):
+        super().__init__(parent)
+        self.files = files
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Set up the confirmation dialog UI."""
+        self.setWindowTitle("Confirm Delete")
+        self.setModal(True)
+        self.resize(500, 400)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Warning label
+        warning = QtWidgets.QLabel("Are you sure you want to delete these files?")
+        warning.setStyleSheet("color: red; font-weight: bold;")
+        layout.addWidget(warning)
+        
+        # Scrollable text area
+        self.text_area = QtWidgets.QTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.setText("\n".join(os.path.basename(f) for f in self.files))
+        layout.addWidget(self.text_area)
+        
+        # File count
+        count_label = QtWidgets.QLabel(f"Total files: {len(self.files)}")
+        layout.addWidget(count_label)
+        
+        # Buttons
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Yes | 
+            QtWidgets.QDialogButtonBox.StandardButton.No
+        )
+        
+        button_box.button(QtWidgets.QDialogButtonBox.StandardButton.No).setDefault(True)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
